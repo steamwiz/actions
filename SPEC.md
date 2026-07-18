@@ -74,17 +74,36 @@ on:
   workflow_call:
 ```
 
+### 4.2.1 Concurrency
+
+The workflow declares a `concurrency` group scoped to the calling repository and
+ref, with `cancel-in-progress: true`. This prevents two simultaneous pushes to
+`main` from running overlapping release jobs, which would cause git-tag and
+`pyproject.toml` conflicts:
+
+```yaml
+concurrency:
+  group: ${{ github.repository }}-${{ github.ref }}-python-pipeline
+  cancel-in-progress: true
+```
+
+Callers that need different concurrency behaviour (e.g. queuing instead of
+cancelling) can override this by setting a `concurrency` key in their own
+caller workflow rather than in the reusable workflow call.
+
 ### 4.3 Inputs
 
 | Input | Type | Default | Description |
 |---|---|---|---|
 | `python-version` | string | `'3.13'` | Python version passed to `actions/setup-python` |
+| `source-dir` | string | `''` | Python source package directory to pass to coverage and pycodestyle. Defaults to the repository name with hyphens replaced by underscores (e.g. `my-pkg` → `my_pkg`), derived at runtime from `github.event.repository.name`. Set explicitly when the project deviates from this convention. |
 | `coverage-min` | number | `80` | Minimum coverage percentage; job fails if below this |
-| `style-dirs` | string | `'test'` | Space-separated list of directories (beyond the source dir) to include in pycodestyle |
+| `style-dirs` | string | `'test'` | Space-separated list of directories (beyond `source-dir`) to include in pycodestyle |
 | `do-pytest` | boolean | `true` | Set to `false` to skip pytest and coverage jobs |
 | `do-coverage` | boolean | `true` | Set to `false` to skip the coverage check (pytest still runs) |
 | `do-style` | boolean | `true` | Set to `false` to skip pycodestyle |
 | `do-release` | boolean | `true` | Set to `false` to skip the release job entirely (useful for PR pipelines or manual skips) |
+| `release-level` | string | `''` | If set to `patch`, `minor`, or `major`, forces PSR to release at that level regardless of commit messages. Empty string means normal conventional-commit-driven release. See §8.3. |
 
 ### 4.4 Secrets
 
@@ -103,17 +122,41 @@ on:
 Outputs are wired through from the `release` job so that the caller's workflow can
 use them — for example, to conditionally run a publish job.
 
+The workflow-level `outputs:` block that wires job outputs to `workflow_call`
+outputs must be declared as follows:
+
+```yaml
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: "The version string released, or empty if no release"
+        value: ${{ jobs.release.outputs.version }}
+      released:
+        description: "'true' if a new version was released, 'false' otherwise"
+        value: ${{ jobs.release.outputs.released }}
+      tag:
+        description: "The git tag created, or empty if no release"
+        value: ${{ jobs.release.outputs.tag }}
+```
+
+The `release` job must in turn declare its own `outputs:` block capturing the
+values emitted by `semantic-release version` (via `$GITHUB_OUTPUT`).
+
 ### 4.6 Job Graph
 
 ```
-install ──┬──► pytest ──► coverage
-          │
-          ├──► style
-          │
-          └──► release  (main branch only; conventional commit driven)
-                  │
-                  └──► build   (only when released == true)
+install ──┬──► pytest ──► coverage ──┐
+          │                          ├──► release  (main branch only; conventional commit driven)
+          └──► style ────────────────┘       │
+                                             └──► build   (only when released == true)
 ```
+
+`release` depends on `coverage` and `style`. Both are optional (can be skipped
+via `do-*` inputs); the `!cancelled() && !failure()` condition on `release`
+allows it to proceed when upstream jobs were skipped rather than failed.
+`pytest` is not listed directly in `release.needs` because `coverage` already
+transitively depends on it.
 
 All jobs run on `ubuntu-latest` unless otherwise noted.
 
@@ -126,14 +169,19 @@ All jobs run on `ubuntu-latest` unless otherwise noted.
   1. `actions/checkout@v4` with `fetch-depth: 0` (needed for semantic release to read commit history)
   2. `actions/setup-python@v5` with the `python-version` input
   3. `actions/cache@v4` keyed on `${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}`; cache path `.venv`
-  4. `pip install poetry`
-  5. `poetry install --no-root`
+  4. `pip install poetry==2.*` (pinned to major version; Dependabot keeps this current)
+  5. `poetry install --no-root` (`--no-root` avoids installing the package itself, which is not needed for running tests or lint)
 - **Outputs**: The `.venv` directory is uploaded as a workflow artifact named `venv` (archived). Subsequent jobs download it rather than re-installing.
 
-> **Note on venv artifact**: GitHub Actions does not share the filesystem between
-> jobs. The venv is uploaded with `actions/upload-artifact@v4` and each downstream
-> job downloads it with `actions/download-artifact@v4` before running. Cache is
-> also used so repeat runs on the same branch are fast without the artifact round-trip.
+> **Note on venv artifact vs cache**: GitHub Actions does not share the filesystem
+> between jobs. The `.venv` is uploaded with `actions/upload-artifact@v4` and
+> each downstream job downloads it with `actions/download-artifact@v4`. The
+> `actions/cache@v4` step in the `install` job serves a different, narrower
+> purpose: it speeds up the `pip install poetry && poetry install` step within
+> the `install` job itself on repeat runs (cache hit avoids a network install).
+> Downstream jobs always use the artifact path — they do not get a cache hit
+> from `install`'s cache entry because caches are not shared across jobs in that
+> way. The artifact upload happens regardless of whether the cache was hit.
 
 #### `pytest`
 
@@ -143,15 +191,17 @@ All jobs run on `ubuntu-latest` unless otherwise noted.
   1. `actions/checkout@v4`
   2. `actions/setup-python@v5`
   3. Download `venv` artifact
-  4. `poetry run python -m coverage run --source=<source-dir> -m pytest test/ -s --junitxml=junit/test-results.xml`
-- **Source dir detection**: The source directory defaults to the repository name with hyphens replaced by underscores (matching Python package convention). This is computed as `${{ github.event.repository.name }}` with hyphens converted to underscores. If a project deviates from this convention it can set an env var or the caller can override via a future `source-dir` input.
+  4. Compute effective source dir: if `inputs.source-dir` is non-empty use it directly; otherwise derive it from `${{ github.event.repository.name }}` by replacing hyphens with underscores using a `run` step that writes `SOURCE_DIR` to `$GITHUB_ENV`.
+  5. `poetry run python -m coverage run --source=$SOURCE_DIR -m pytest test/ -s --junitxml=junit/test-results.xml`
 - **Artifacts uploaded**: `.coverage`, `junit/` (JUnit XML); retained 7 days
 - **Test results**: Upload JUnit XML with `actions/upload-artifact@v4`; report in PR checks via `EnricoMi/publish-unit-test-result-action@v2` (summary only, not blocking)
 
 #### `coverage`
 
 - **Needs**: `pytest`
-- **Condition**: `inputs.do-coverage == true`
+- **Condition**: `inputs.do-pytest == true` AND `inputs.do-coverage == true`
+  (if `pytest` was skipped, there is no `.coverage` artifact to download, so
+  `coverage` must also be skipped)
 - **Steps**:
   1. `actions/setup-python@v5`
   2. `pip install coverage`
@@ -168,35 +218,66 @@ All jobs run on `ubuntu-latest` unless otherwise noted.
   1. `actions/checkout@v4`
   2. `actions/setup-python@v5`
   3. Download `venv` artifact
-  4. `poetry run pycodestyle <source-dir>`
-  5. For each directory in `inputs.style-dirs`: `poetry run pycodestyle <dir>` (skip if directory does not exist)
+  4. Compute `SOURCE_DIR` using the same logic as the `pytest` job (check `inputs.source-dir`; fall back to repo-name-derived value via `$GITHUB_ENV`).
+  5. `poetry run pycodestyle $SOURCE_DIR`
+  6. For each directory in `inputs.style-dirs`: `poetry run pycodestyle <dir>` (skip if directory does not exist)
 
 #### `release`
 
-- **Needs**: `pytest`, `coverage`, `style` (all must pass)
+- **Needs**: `coverage`, `style` (both must pass or be skipped)
 - **Condition**: `github.ref == 'refs/heads/main'` AND `inputs.do-release == true`
+  AND `!cancelled()` AND `!failure()`
+
+> **Skipped-job propagation**: GitHub Actions treats a skipped job as neither
+> failed nor successful for the purpose of `needs`. However, when a job lists a
+> skipped job in `needs`, the dependent job will also be skipped by default
+> unless an explicit `if:` expression permits it. The `!cancelled() &&
+> !failure()` guard (combined with the existing `do-release` and `github.ref`
+> checks) ensures that:
+>
+> - If `do-style: false`, the `style` job is skipped. `release` still runs
+>   because `!failure()` is true for a skipped job.
+> - If `do-pytest: false`, `pytest` is skipped, which also skips `coverage`.
+>   `release` still runs under the same logic, but only tests that *did* run
+>   are considered.
+> - If any job that *did* run actually fails, `failure()` returns `true` and
+>   `release` is correctly blocked.
+>
+> `coverage` already depends on `pytest` via its own `needs`, so `release`
+> does not need to list `pytest` directly (removing the redundancy in the
+> original spec).
 - **Permissions required**: `contents: write`, `issues: write`, `pull-requests: write`
 - **Steps**:
   1. `actions/checkout@v4` with `fetch-depth: 0` and `token: ${{ secrets.GH_TOKEN }}`
   2. `actions/setup-python@v5`
-  3. `pip install python-semantic-release`
+  3. `pip install python-semantic-release==10.*` (pinned to major version; Dependabot keeps this current)
   4. Configure git user (name: `github-actions[bot]`, email: `41898282+github-actions[bot]@users.noreply.github.com`)
   5. `semantic-release version` — reads conventional commits, bumps version in `pyproject.toml`, commits, tags, pushes, creates GitHub Release with changelog
   6. Capture outputs: `version`, `released`, `tag` from semantic-release exit code and output
 - **python-semantic-release configuration** (expected in caller's `pyproject.toml`):
   ```toml
   [tool.semantic_release]
-  version_toml = ["pyproject.toml:tool.poetry.version"]
-  branch = "main"
-  upload_to_pypi = false          # PyPI publish is handled project-side
-  upload_to_release = false       # No dist assets in the GitHub Release
-  build_command = ""              # Build handled in separate job
-  changelog_file = "CHANGELOG.md"
-  commit_version_number = true
   tag_format = "v{version}"
+  version_toml = ["pyproject.toml:tool.poetry.version"]
+  build_command = false           # Build is handled in a separate job; disable PSR's own build step
+
+  [tool.semantic_release.branches.main]
+  match = "main"
+  prerelease = false
+
+  [tool.semantic_release.remote.token]
+  env = "GH_TOKEN"
+
+  [tool.semantic_release.publish]
+  upload_to_vcs_release = false   # No dist assets attached to the GitHub Release; build job handles that
   ```
   Projects must have this block (or equivalent) in their `pyproject.toml`. The
   spec will provide a canonical snippet in the README.
+
+  > **PSR version**: the release job installs `python-semantic-release==10.*` (pinned
+  > major). The configuration keys above are valid for PSR v10. If upgrading PSR
+  > to a new major version, review the upgrade guide at
+  > https://python-semantic-release.readthedocs.io/ before bumping the pin.
 
 #### `build`
 
@@ -246,6 +327,7 @@ jobs:
     uses: steamwiz/actions/.github/workflows/cloudflare-deploy.yml@v1
     with:
       cloudflare-project-name: steamwiz-busy
+      directory: html
     secrets: inherit
 ```
 
@@ -302,7 +384,11 @@ None.
 
 ### 6.1 Purpose
 
-Deploy a static site artifact to Cloudflare Pages.
+Deploy a static site artifact to Cloudflare Pages using `cloudflare/wrangler-action`.
+
+> **Migration note**: The previously common `cloudflare/pages-action` was
+> deprecated by Cloudflare in October 2024 (final release v1.5.0). This spec
+> uses `cloudflare/wrangler-action@v4` (the official replacement) throughout.
 
 ### 6.2 Trigger
 
@@ -341,11 +427,10 @@ None.
 - **Permissions**: none beyond default
 - **Steps**:
   1. Download artifact `${{ inputs.artifact-name }}`
-  2. `cloudflare/pages-action@v1` with:
+  2. `cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0` (v4.0.0) with:
      - `apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}`
      - `accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}`
-     - `projectName: ${{ inputs.cloudflare-project-name }}`
-     - `directory: ${{ inputs.directory }}`
+     - `command: pages deploy ${{ inputs.directory }} --project-name=${{ inputs.cloudflare-project-name }}`
      - `gitHubToken: ${{ github.token }}` (for Cloudflare to post deployment status checks on PRs)
 
 ---
@@ -521,36 +606,45 @@ first-party GitHub Actions (`actions/*`) and well-maintained community actions.
 Use SHAs for any action with a less certain maintenance track. Never use `@main`
 or `@master` in production workflows.
 
-Minimum pinned versions:
+Minimum pinned versions. GitHub-owned (`actions/*`) and `pypa/*` actions are
+pinned to major version tags (trusted, verified creators). All other third-party
+actions are pinned to full-length commit SHAs with the tag noted in a comment.
+Dependabot (§14) keeps these SHAs current.
 
-| Action | Pin |
-|---|---|
-| `actions/checkout` | `@v4` |
-| `actions/setup-python` | `@v5` |
-| `actions/cache` | `@v4` |
-| `actions/upload-artifact` | `@v4` |
-| `actions/download-artifact` | `@v4` |
-| `peaceiris/actions-mdbook` | `@v2` |
-| `cloudflare/pages-action` | `@v1` |
-| `pypa/gh-action-pypi-publish` | `@release/v1` |
-| `EnricoMi/publish-unit-test-result-action` | `@v2` |
-| `irongut/CodeCoverageSummary` | `@v1.3.0` |
+| Action | Pin | Notes |
+|---|---|---|
+| `actions/checkout` | `@v4` | GitHub-owned |
+| `actions/setup-python` | `@v5` | GitHub-owned |
+| `actions/cache` | `@v4` | GitHub-owned |
+| `actions/upload-artifact` | `@v4` | GitHub-owned |
+| `actions/download-artifact` | `@v4` | GitHub-owned |
+| `pypa/gh-action-pypi-publish` | `@release/v1` | PyPA-owned |
+| `peaceiris/actions-mdbook` | `@ee69d230fe19748b7abf22df32acaa93833fad08` | v2.0.0 |
+| `cloudflare/wrangler-action` | `@ebbaa1584979971c8614a24965b4405ff95890e0` | v4.0.0; replaces deprecated `cloudflare/pages-action` |
+| `EnricoMi/publish-unit-test-result-action` | `@d0a4676d0e0b938bc201470d88276b7c74c712b3` | v2.24.0 |
+| `irongut/CodeCoverageSummary` | `@v1.3.0` | Final release; no further development — tag is immutable in practice |
 
 ---
 
 ## 13. Permissions Model
 
-Each reusable workflow declares only the permissions it requires. Callers should
-pass `secrets: inherit` and rely on org-level or repo-level secrets rather than
+Each reusable workflow declares only the permissions it requires. A top-level
+`permissions: {}` block is set on every workflow to deny all permissions by
+default; individual jobs then grant only what they need. Callers should pass
+`secrets: inherit` and rely on org-level or repo-level secrets rather than
 passing individual secrets by name where possible.
 
-| Workflow | Permissions declared |
-|---|---|
-| `python-pipeline.yml` (non-release jobs) | `contents: read` |
-| `python-pipeline.yml` (release job) | `contents: write`, `issues: write`, `pull-requests: write` |
-| `mdbook-build.yml` | `contents: read` |
-| `cloudflare-deploy.yml` | `contents: read` |
-| Project-side `publish.yml` | `id-token: write`, `contents: read` |
+```yaml
+# Top of every reusable workflow file
+permissions: {}   # deny-all default; jobs override below
+```
+
+| Workflow | Top-level | Job-level overrides |
+|---|---|---|
+| `python-pipeline.yml` | `{}` (deny all) | non-release jobs: `contents: read`; release job: `contents: write`, `issues: write`, `pull-requests: write` |
+| `mdbook-build.yml` | `{}` (deny all) | build job: `contents: read` |
+| `cloudflare-deploy.yml` | `{}` (deny all) | deploy job: `contents: read` |
+| Project-side `publish.yml` | `{}` (deny all) | pypi-publish job: `id-token: write`, `contents: read` |
 
 ---
 
@@ -564,9 +658,25 @@ When the `steamwiz/actions` repository is created:
 3. Add org-level secrets: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`.
 4. Create a `CHANGELOG.md` (empty initially).
 5. Create the three workflow files (per this spec).
-6. Create an initial git tag `v0.1.0` and the floating tag `v0` once the first
+6. Add a Dependabot configuration at `.github/dependabot.yml` to keep action
+   SHA pins and pip dependencies current:
+   ```yaml
+   version: 2
+   updates:
+     - package-ecosystem: github-actions
+       directory: /
+       schedule:
+         interval: weekly
+     - package-ecosystem: pip
+       directory: /
+       schedule:
+         interval: weekly
+   ```
+   Dependabot will open PRs when new versions of pinned actions or pip packages
+   (Poetry, PSR) are released.
+7. Create an initial git tag `v0.1.0` and the floating tag `v0` once the first
    working version is validated.
-7. Update the floating tag `v1` after the first stable release.
+8. Update the floating tag `v1` after the first stable release.
 
 The `steamwiz/actions` repo itself uses a minimal self-hosted pipeline (or manual
 process) for its own releases; it does not call itself recursively.
@@ -578,9 +688,6 @@ process) for its own releases; it does not call itself recursively.
   only). The caller's workflow can add `workflow_dispatch` with a `release-level`
   input that flows through to the reusable workflow's `release-level` input.
   Each project's caller workflow should document this.
-
-- **Dependabot for action pinning**: The `steamwiz/actions` repo should have a
-  Dependabot config (`/.github/dependabot.yml`) to keep action versions current.
 
 - **Test pipeline for the library itself**: Consider a self-test pipeline in
   `steamwiz/actions` that validates workflow YAML syntax (`actionlint`) on every
