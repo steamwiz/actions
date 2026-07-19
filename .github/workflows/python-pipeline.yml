@@ -126,21 +126,17 @@ jobs:
       - name: Run pytest with coverage
         run: >
           poetry run python -m coverage run
-          --data-file=${{ github.workspace }}/.coverage
           --source=$SOURCE_DIR
           -m pytest test/ -s
           --junitxml=junit/test-results.xml
-
-      - name: List workspace after coverage run
-        if: always()
-        run: ls -la ${{ github.workspace }}/ | grep coverage || echo "No coverage files found"
 
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage
-          path: ${{ github.workspace }}/.coverage
+          path: .coverage
+          include-hidden-files: true
           retention-days: 7
 
       - name: Upload JUnit results artifact
