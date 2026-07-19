@@ -131,6 +131,10 @@ jobs:
           -m pytest test/ -s
           --junitxml=junit/test-results.xml
 
+      - name: List workspace after coverage run
+        if: always()
+        run: ls -la ${{ github.workspace }}/ | grep coverage || echo "No coverage files found"
+
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v4
