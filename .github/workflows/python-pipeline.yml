@@ -108,6 +108,9 @@ jobs:
       - name: Install Poetry
         run: pip install "poetry==2.*"
 
+      - name: Configure Poetry to create venv in project
+        run: poetry config virtualenvs.in-project true
+
       - name: Install project dependencies
         run: poetry install --no-root
 
