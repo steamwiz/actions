@@ -183,10 +183,10 @@ jobs:
           name: coverage
 
       - name: Generate XML report
-        run: python -m coverage xml
+        run: python -m coverage xml --data-file=.coverage
 
       - name: Enforce coverage threshold
-        run: python -m coverage report -m --fail-under ${{ inputs.coverage-min }}
+        run: python -m coverage report -m --data-file=.coverage --fail-under ${{ inputs.coverage-min }}
 
       - name: Upload coverage XML artifact
         if: always()
