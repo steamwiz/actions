@@ -309,7 +309,7 @@ jobs:
         run: |
           FORCE_FLAG=""
           if [ -n "${{ inputs.release-level }}" ]; then
-            FORCE_FLAG="--force-level ${{ inputs.release-level }}"
+            FORCE_FLAG="--${{ inputs.release-level }}"
           fi
           semantic-release version $FORCE_FLAG
 
