@@ -58,11 +58,14 @@ on:
         default: ''
 
     secrets:
-      GH_TOKEN:
+      APP_ID:
         description: >
-          GitHub token with contents: write and issues: write for
-          python-semantic-release to push tags, create GitHub Releases, and
-          update changelogs.
+          GitHub App ID for steamwiz-releasebot. Used to generate a short-lived
+          installation token for python-semantic-release.
+        required: false
+      APP_PRIVATE_KEY:
+        description: >
+          GitHub App private key (PEM) for steamwiz-releasebot.
         required: false
 
     outputs:
@@ -272,10 +275,17 @@ jobs:
       released: ${{ steps.psr.outputs.released }}
       tag: ${{ steps.psr.outputs.tag }}
     steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GH_TOKEN || github.token }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - uses: actions/setup-python@v5
         with:
@@ -286,13 +296,13 @@ jobs:
 
       - name: Configure git user
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "steamwiz-releasebot[bot]"
+          git config user.email "steamwiz-releasebot[bot]@users.noreply.github.com"
 
       - name: Run semantic-release
         id: psr
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           FORCE_FLAG=""
           if [ -n "${{ inputs.release-level }}" ]; then
