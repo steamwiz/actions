@@ -1,0 +1,366 @@
+# Reusable workflow: Full CI/CD pipeline for a Python PyPI package.
+# Callers: uses: steamwiz/actions/.github/workflows/python-pipeline.yml@v1
+#
+# See SPEC.md §4 for full documentation.
+
+name: Python Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python version passed to actions/setup-python"
+        type: string
+        default: '3.13'
+      source-dir:
+        description: >
+          Python source package directory for coverage and pycodestyle.
+          Defaults to the repo name with hyphens replaced by underscores.
+          Set explicitly when the project deviates from that convention.
+        type: string
+        default: ''
+      coverage-min:
+        description: "Minimum coverage percentage; job fails if below this"
+        type: number
+        default: 80
+      style-dirs:
+        description: >
+          Space-separated list of directories (beyond source-dir) to include
+          in pycodestyle. Defaults to 'test'.
+        type: string
+        default: 'test'
+      do-pytest:
+        description: "Set to false to skip pytest and coverage jobs"
+        type: boolean
+        default: true
+      do-coverage:
+        description: "Set to false to skip the coverage check (pytest still runs)"
+        type: boolean
+        default: true
+      do-style:
+        description: "Set to false to skip pycodestyle"
+        type: boolean
+        default: true
+      do-release:
+        description: "Set to false to skip the release job entirely"
+        type: boolean
+        default: true
+      release-level:
+        description: >
+          If set to patch, minor, or major, forces python-semantic-release to
+          release at that level regardless of commit messages. Empty string means
+          normal conventional-commit-driven release.
+        type: string
+        default: ''
+
+    secrets:
+      GH_TOKEN:
+        description: >
+          GitHub token with contents: write and issues: write for
+          python-semantic-release to push tags, create GitHub Releases, and
+          update changelogs.
+        required: false
+
+    outputs:
+      version:
+        description: "The version string released (e.g. 1.4.2), or empty if no release"
+        value: ${{ jobs.release.outputs.version }}
+      released:
+        description: "'true' if a new version was released, 'false' otherwise"
+        value: ${{ jobs.release.outputs.released }}
+      tag:
+        description: "The git tag created (e.g. v1.4.2), or empty if no release"
+        value: ${{ jobs.release.outputs.tag }}
+
+# Prevent overlapping release jobs on rapid pushes to main.
+concurrency:
+  group: ${{ github.repository }}-${{ github.ref }}-python-pipeline
+  cancel-in-progress: true
+
+# Deny all permissions by default; jobs grant only what they need.
+permissions: {}
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # install: Set up Python, install Poetry and project dependencies, upload
+  # the .venv as an artifact so downstream jobs don't re-install.
+  # ---------------------------------------------------------------------------
+  install:
+    name: Install
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed by semantic-release
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install Poetry
+        run: pip install "poetry==2.*"
+
+      - name: Install project dependencies
+        run: poetry install --no-root
+
+      - name: Upload venv artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: venv
+          path: .venv/
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # pytest: Run the test suite and upload coverage + JUnit results.
+  # ---------------------------------------------------------------------------
+  pytest:
+    name: Test
+    needs: install
+    if: inputs.do-pytest == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Download venv artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: venv
+          path: .venv/
+
+      - name: Make venv executables executable
+        run: chmod -R u+x .venv/bin/
+
+      - name: Resolve source directory
+        run: |
+          if [ -n "${{ inputs.source-dir }}" ]; then
+            echo "SOURCE_DIR=${{ inputs.source-dir }}" >> "$GITHUB_ENV"
+          else
+            SOURCE_DIR=$(echo "${{ github.event.repository.name }}" | tr '-' '_')
+            echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run pytest with coverage
+        run: >
+          poetry run python -m coverage run
+          --source=$SOURCE_DIR
+          -m pytest test/ -s
+          --junitxml=junit/test-results.xml
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: .coverage
+          retention-days: 7
+
+      - name: Upload JUnit results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit
+          path: junit/
+          retention-days: 7
+
+      - name: Publish test results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@d0a4676d0e0b938bc201470d88276b7c74c712b3   # v2.24.0
+        with:
+          files: junit/test-results.xml
+
+  # ---------------------------------------------------------------------------
+  # coverage: Download the .coverage artifact and enforce the minimum threshold.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Coverage
+    needs: pytest
+    if: inputs.do-pytest == true && inputs.do-coverage == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install coverage
+        run: pip install coverage
+
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage
+
+      - name: Generate XML report
+        run: python -m coverage xml
+
+      - name: Enforce coverage threshold
+        run: python -m coverage report -m --fail-under ${{ inputs.coverage-min }}
+
+      - name: Upload coverage XML artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
+
+      - name: Post coverage summary
+        if: always()
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename: coverage.xml
+          badge: true
+          format: markdown
+          output: both
+
+  # ---------------------------------------------------------------------------
+  # style: Run pycodestyle over source-dir and any extra style-dirs.
+  # ---------------------------------------------------------------------------
+  style:
+    name: Style
+    needs: install
+    if: inputs.do-style == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Download venv artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: venv
+          path: .venv/
+
+      - name: Make venv executables executable
+        run: chmod -R u+x .venv/bin/
+
+      - name: Resolve source directory
+        run: |
+          if [ -n "${{ inputs.source-dir }}" ]; then
+            echo "SOURCE_DIR=${{ inputs.source-dir }}" >> "$GITHUB_ENV"
+          else
+            SOURCE_DIR=$(echo "${{ github.event.repository.name }}" | tr '-' '_')
+            echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check style (source dir)
+        run: poetry run pycodestyle "$SOURCE_DIR"
+
+      - name: Check style (extra dirs)
+        run: |
+          for dir in ${{ inputs.style-dirs }}; do
+            if [ -d "$dir" ]; then
+              poetry run pycodestyle "$dir"
+            fi
+          done
+
+  # ---------------------------------------------------------------------------
+  # release: Bump version, tag, push, create GitHub Release via PSR.
+  # Runs only on main, only when do-release is true, only when upstream jobs
+  # passed or were intentionally skipped.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Release
+    needs: [coverage, style]
+    if: >
+      github.ref == 'refs/heads/main' &&
+      inputs.do-release == true &&
+      !cancelled() &&
+      !failure()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      version: ${{ steps.psr.outputs.version }}
+      released: ${{ steps.psr.outputs.released }}
+      tag: ${{ steps.psr.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install python-semantic-release
+        run: pip install "python-semantic-release==10.*"
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run semantic-release
+        id: psr
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          FORCE_FLAG=""
+          if [ -n "${{ inputs.release-level }}" ]; then
+            FORCE_FLAG="--force-level ${{ inputs.release-level }}"
+          fi
+          semantic-release version $FORCE_FLAG
+
+  # ---------------------------------------------------------------------------
+  # build: Build the distribution using the tagged commit so pyproject.toml
+  # contains the correct released version.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Download venv artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: venv
+          path: .venv/
+
+      - name: Make venv executables executable
+        run: chmod -R u+x .venv/bin/
+
+      - name: Build distribution
+        run: poetry build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30

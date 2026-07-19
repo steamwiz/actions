@@ -1,0 +1,63 @@
+# Reusable workflow: Deploy a static site artifact to Cloudflare Pages.
+# Callers: uses: steamwiz/actions/.github/workflows/cloudflare-deploy.yml@v1
+#
+# Requires org-level or repo-level secrets:
+#   CLOUDFLARE_ACCOUNT_ID — 32-hex-char Cloudflare account ID
+#   CLOUDFLARE_API_TOKEN  — Cloudflare API token with Pages edit permission
+#
+# See SPEC.md §6 for full documentation.
+
+name: Cloudflare Deploy
+
+on:
+  workflow_call:
+    inputs:
+      cloudflare-project-name:
+        description: "Cloudflare Pages project name"
+        type: string
+        required: true
+      artifact-name:
+        description: "Name of the artifact to download and deploy"
+        type: string
+        default: 'mdbook-site'
+      directory:
+        description: "Subdirectory within the artifact to deploy"
+        type: string
+        default: 'html'
+
+    secrets:
+      CLOUDFLARE_ACCOUNT_ID:
+        description: "Cloudflare account ID (32 hex chars)"
+        required: true
+      CLOUDFLARE_API_TOKEN:
+        description: "Cloudflare API token with Pages edit permission"
+        required: true
+
+# Deny all permissions by default; jobs grant only what they need.
+permissions: {}
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # deploy: Download the static site artifact and push it to Cloudflare Pages.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Cloudflare Pages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0   # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >
+            pages deploy ${{ inputs.directory }}
+            --project-name=${{ inputs.cloudflare-project-name }}
+          gitHubToken: ${{ github.token }}

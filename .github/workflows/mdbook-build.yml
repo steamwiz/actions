@@ -1,0 +1,65 @@
+# Reusable workflow: Build an mdBook documentation site and upload the result
+# as a workflow artifact for a subsequent deploy step to consume.
+# Callers: uses: steamwiz/actions/.github/workflows/mdbook-build.yml@v1
+#
+# See SPEC.md §5 for full documentation.
+
+name: mdBook Build
+
+on:
+  workflow_call:
+    inputs:
+      mdbook-version:
+        description: "Version of mdBook to install via peaceiris/actions-mdbook"
+        type: string
+        default: 'latest'
+      output-dir:
+        description: "Directory mdBook builds into (matches book.toml build.build-dir)"
+        type: string
+        default: 'html'
+      artifact-name:
+        description: "Name of the uploaded artifact"
+        type: string
+        default: 'mdbook-site'
+      artifact-retention-days:
+        description: "Artifact retention in days"
+        type: number
+        default: 7
+
+    outputs:
+      artifact-name:
+        description: "The artifact name (echoes the input, for downstream reference)"
+        value: ${{ jobs.build.outputs.artifact-name }}
+
+# Deny all permissions by default; jobs grant only what they need.
+permissions: {}
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # build: Install mdBook, build the site, upload the output directory.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build mdBook
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact-name: ${{ inputs.artifact-name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08   # v2.0.0
+        with:
+          mdbook-version: ${{ inputs.mdbook-version }}
+
+      - name: Build documentation
+        run: mdbook build --dest-dir "${{ inputs.output-dir }}"
+
+      - name: Upload site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.output-dir }}/
+          retention-days: ${{ inputs.artifact-retention-days }}
