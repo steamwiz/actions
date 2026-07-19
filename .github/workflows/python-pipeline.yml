@@ -113,7 +113,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: venv
-          path: .venv
+          path: ${{ github.workspace }}/.venv
           retention-days: 1
 
   # ---------------------------------------------------------------------------
