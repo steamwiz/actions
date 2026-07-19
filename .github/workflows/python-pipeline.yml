@@ -133,13 +133,16 @@ jobs:
           -m pytest test/ -s
           --junitxml=junit/test-results.xml
 
+      - name: Rename coverage file for upload
+        if: always()
+        run: mv .coverage coverage.db
+
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage
-          path: .coverage
-          include-hidden-files: true
+          path: coverage.db
           retention-days: 7
 
       - name: Upload JUnit results artifact
@@ -181,13 +184,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: coverage
-          path: coverage-data/
 
       - name: Generate XML report
-        run: python -m coverage xml --data-file=coverage-data/.coverage
+        run: python -m coverage xml --data-file=coverage.db
 
       - name: Enforce coverage threshold
-        run: python -m coverage report -m --data-file=coverage-data/.coverage --fail-under ${{ inputs.coverage-min }}
+        run: python -m coverage report -m --data-file=coverage.db --fail-under ${{ inputs.coverage-min }}
 
       - name: Upload coverage XML artifact
         if: always()
