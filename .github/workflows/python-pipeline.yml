@@ -100,16 +100,16 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
-      - uses: actions/cache@v4
-        with:
-          path: .venv
-          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
-
       - name: Install Poetry
         run: pip install "poetry==2.*"
 
       - name: Configure Poetry to create venv in project
         run: poetry config virtualenvs.in-project true
+
+      - uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
 
       - name: Install project dependencies
         run: poetry install --no-root
