@@ -1,6 +1,10 @@
 # Reusable workflow: Full CI/CD pipeline for a Python PyPI package.
 # Callers: uses: steamwiz/actions/.github/workflows/python-pipeline.yml@v1
 #
+# Each job installs Poetry and dependencies independently, using the Poetry
+# virtualenvs cache (~/.cache/pypoetry/virtualenvs) to avoid redundant
+# network downloads across jobs on the same runner.
+#
 # See SPEC.md §4 for full documentation.
 
 name: Python Pipeline
@@ -83,45 +87,10 @@ permissions: {}
 jobs:
 
   # ---------------------------------------------------------------------------
-  # install: Set up Python, install Poetry and project dependencies, upload
-  # the .venv as an artifact so downstream jobs don't re-install.
-  # ---------------------------------------------------------------------------
-  install:
-    name: Install
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # full history needed by semantic-release
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python-version }}
-
-      - name: Install Poetry
-        run: pip install "poetry==2.*"
-
-      - name: Configure Poetry to create venv in project
-        run: poetry config virtualenvs.in-project true
-
-      - name: Install project dependencies
-        run: poetry install --no-root
-
-      - name: Upload venv artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: venv
-          path: ${{ github.workspace }}/.venv
-          retention-days: 1
-
-  # ---------------------------------------------------------------------------
-  # pytest: Run the test suite and upload coverage + JUnit results.
+  # pytest: Install dependencies and run the test suite with coverage.
   # ---------------------------------------------------------------------------
   pytest:
     name: Test
-    needs: install
     if: inputs.do-pytest == true
     runs-on: ubuntu-latest
     permissions:
@@ -133,14 +102,16 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
-      - name: Download venv artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: venv
-          path: .venv/
+      - name: Install Poetry
+        run: pip install "poetry==2.*"
 
-      - name: Make venv executables executable
-        run: chmod -R u+x .venv/bin/
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: ${{ runner.os }}-poetry-${{ inputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install project dependencies
+        run: poetry install --no-root
 
       - name: Resolve source directory
         run: |
@@ -232,7 +203,6 @@ jobs:
   # ---------------------------------------------------------------------------
   style:
     name: Style
-    needs: install
     if: inputs.do-style == true
     runs-on: ubuntu-latest
     permissions:
@@ -244,14 +214,16 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
-      - name: Download venv artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: venv
-          path: .venv/
+      - name: Install Poetry
+        run: pip install "poetry==2.*"
 
-      - name: Make venv executables executable
-        run: chmod -R u+x .venv/bin/
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: ${{ runner.os }}-poetry-${{ inputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install project dependencies
+        run: poetry install --no-root
 
       - name: Resolve source directory
         run: |
@@ -344,14 +316,11 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
-      - name: Download venv artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: venv
-          path: .venv/
+      - name: Install Poetry
+        run: pip install "poetry==2.*"
 
-      - name: Make venv executables executable
-        run: chmod -R u+x .venv/bin/
+      - name: Install project dependencies
+        run: poetry install --no-root
 
       - name: Build distribution
         run: poetry build
