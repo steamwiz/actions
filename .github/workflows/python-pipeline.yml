@@ -338,38 +338,10 @@ jobs:
           echo "tag=$PSR_TAG"           >> "$GITHUB_OUTPUT"
           echo "Outputs set: released=$PSR_RELEASED  version=$PSR_VERSION  tag=$PSR_TAG"
 
-  # ---------------------------------------------------------------------------
-  # build: Build the distribution using the tagged commit so pyproject.toml
-  # contains the correct released version.
-  # ---------------------------------------------------------------------------
-  build:
-    name: Build
-    needs: release
-    if: needs.release.outputs.released == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python-version }}
-
-      - name: Install Poetry
-        run: pip install "poetry==2.*"
-
-      - name: Install project dependencies
-        run: poetry install --no-root
-
-      - name: Build distribution
-        run: poetry build
-
-      - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-          retention-days: 30
+  # NOTE: The build job (poetry build + upload dist artifact) is intentionally
+  # NOT included in this reusable workflow. GitHub Actions if: conditions on jobs
+  # inside a called reusable workflow cannot reliably evaluate outputs from other
+  # jobs in that same workflow when those outputs come from run: steps.
+  # The build job must live in the caller's workflow, where it can use
+  # needs.<pipeline-job>.outputs.released and needs.<pipeline-job>.outputs.tag
+  # directly. See steamwiz/actions SPEC.md §4.7 build job specification.
