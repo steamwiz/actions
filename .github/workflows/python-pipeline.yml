@@ -274,9 +274,9 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
-      version: ${{ steps.psr.outputs.version }}
-      released: ${{ steps.psr.outputs.released }}
-      tag: ${{ steps.psr.outputs.tag }}
+      version: ${{ steps.set-outputs.outputs.version }}
+      released: ${{ steps.set-outputs.outputs.released }}
+      tag: ${{ steps.set-outputs.outputs.tag }}
     steps:
       - name: Generate app token
         id: app-token
@@ -315,20 +315,28 @@ jobs:
           # both into $GITHUB_OUTPUT. GitHub Actions uses the FIRST value for
           # duplicate keys, so released stays 'false'. Work around this by having
           # PSR write to a sidecar file, then extracting the last (authoritative)
-          # value of each key and writing it once to the real $GITHUB_OUTPUT.
+          # value of each key and writing it to GITHUB_ENV for the next step.
           SIDECAR=$(mktemp)
           GITHUB_OUTPUT="$SIDECAR" semantic-release version $FORCE_FLAG
           echo "--- PSR sidecar (raw) ---"
           grep -E "^(released|version|tag)=" "$SIDECAR" || echo "(none)"
-          RELEASED=$(grep "^released=" "$SIDECAR" | tail -1 | cut -d= -f2)
-          VERSION=$(grep  "^version="  "$SIDECAR" | tail -1 | cut -d= -f2)
-          TAG=$(grep      "^tag="      "$SIDECAR" | tail -1 | cut -d= -f2)
-          RELEASED=${RELEASED:-false}
-          echo "released=$RELEASED" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
-          echo "--- Final outputs: released=$RELEASED  version=$VERSION  tag=$TAG ---"
+          PSR_RELEASED=$(grep "^released=" "$SIDECAR" | tail -1 | cut -d= -f2)
+          PSR_VERSION=$(grep  "^version="  "$SIDECAR" | tail -1 | cut -d= -f2)
+          PSR_TAG=$(grep      "^tag="      "$SIDECAR" | tail -1 | cut -d= -f2)
+          PSR_RELEASED=${PSR_RELEASED:-false}
+          echo "PSR_RELEASED=$PSR_RELEASED" >> "$GITHUB_ENV"
+          echo "PSR_VERSION=$PSR_VERSION"   >> "$GITHUB_ENV"
+          echo "PSR_TAG=$PSR_TAG"           >> "$GITHUB_ENV"
+          echo "Extracted: released=$PSR_RELEASED  version=$PSR_VERSION  tag=$PSR_TAG"
           rm -f "$SIDECAR"
+
+      - name: Set job outputs
+        id: set-outputs
+        run: |
+          echo "released=$PSR_RELEASED" >> "$GITHUB_OUTPUT"
+          echo "version=$PSR_VERSION"   >> "$GITHUB_OUTPUT"
+          echo "tag=$PSR_TAG"           >> "$GITHUB_OUTPUT"
+          echo "Outputs set: released=$PSR_RELEASED  version=$PSR_VERSION  tag=$PSR_TAG"
 
   # ---------------------------------------------------------------------------
   # build: Build the distribution using the tagged commit so pyproject.toml
