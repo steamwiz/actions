@@ -311,27 +311,24 @@ jobs:
           if [ -n "${{ inputs.release-level }}" ]; then
             FORCE_FLAG="--${{ inputs.release-level }}"
           fi
-          # PSR writes released/version/tag/etc to $GITHUB_OUTPUT internally.
-          # We also capture the new version via --print to set outputs explicitly
-          # as a belt-and-suspenders fallback.
-          NEXT_VERSION=$(semantic-release version --print $FORCE_FLAG 2>/dev/null || true)
-          semantic-release version $FORCE_FLAG
-          # Confirm PSR's own writes made it into GITHUB_OUTPUT
-          echo "--- PSR outputs in GITHUB_OUTPUT ---"
-          grep -E "^(released|version|tag)=" "$GITHUB_OUTPUT" || echo "(no PSR outputs found)"
-          # Belt-and-suspenders: if PSR didn't write 'released', write it now
-          if ! grep -q "^released=" "$GITHUB_OUTPUT"; then
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
-            if [ -n "$NEXT_VERSION" ] && [ "$LATEST_TAG" = "v$NEXT_VERSION" ]; then
-              echo "released=true" >> "$GITHUB_OUTPUT"
-              echo "version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
-              echo "tag=v$NEXT_VERSION" >> "$GITHUB_OUTPUT"
-              echo "Fallback: wrote released=true for v$NEXT_VERSION"
-            else
-              echo "released=false" >> "$GITHUB_OUTPUT"
-              echo "Fallback: wrote released=false"
-            fi
-          fi
+          # PSR v10 writes released=false at init then released=true after tagging,
+          # both into $GITHUB_OUTPUT. GitHub Actions uses the FIRST value for
+          # duplicate keys, so released stays 'false'. Work around this by having
+          # PSR write to a sidecar file, then extracting the last (authoritative)
+          # value of each key and writing it once to the real $GITHUB_OUTPUT.
+          SIDECAR=$(mktemp)
+          GITHUB_OUTPUT="$SIDECAR" semantic-release version $FORCE_FLAG
+          echo "--- PSR sidecar (raw) ---"
+          grep -E "^(released|version|tag)=" "$SIDECAR" || echo "(none)"
+          RELEASED=$(grep "^released=" "$SIDECAR" | tail -1 | cut -d= -f2)
+          VERSION=$(grep  "^version="  "$SIDECAR" | tail -1 | cut -d= -f2)
+          TAG=$(grep      "^tag="      "$SIDECAR" | tail -1 | cut -d= -f2)
+          RELEASED=${RELEASED:-false}
+          echo "released=$RELEASED" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"           >> "$GITHUB_OUTPUT"
+          echo "--- Final outputs: released=$RELEASED  version=$VERSION  tag=$TAG ---"
+          rm -f "$SIDECAR"
 
   # ---------------------------------------------------------------------------
   # build: Build the distribution using the tagged commit so pyproject.toml
